@@ -14,21 +14,24 @@ import {
   InteractionCall,
   InteractionResult,
   LoggerFactory,
-  MemCache,
   StateEvaluator,
   TagsParser
 } from '@smartweave';
 import Arweave from 'arweave';
 
-// FIXME: currently this is tightly coupled with the HandlerApi
-export class DefaultStateEvaluator implements StateEvaluator {
+/**
+ * This class contains the base functionality of evaluating the contracts state - according
+ * to the SmartWeave protocol.
+ * Marked as abstract - as without help of any cache - the evaluation in real-life applications
+ * would be really slow - so using this class without any caching ({@link CacheableStateEvaluator})
+ * mechanism built on top makes no sense.
+ */
+export abstract class DefaultStateEvaluator implements StateEvaluator {
   private readonly logger = LoggerFactory.INST.create('DefaultStateEvaluator');
-
-  private readonly transactionStateCache: MemCache<EvalStateResult<unknown>> = new MemCache();
 
   private readonly tagsParser = new TagsParser();
 
-  constructor(
+  protected constructor(
     private readonly arweave: Arweave,
     private readonly executionContextModifiers: ExecutionContextModifier[] = []
   ) {}
@@ -59,7 +62,7 @@ export class DefaultStateEvaluator implements StateEvaluator {
     let validity = deepCopy(baseState.validity);
 
     this.logger.info(
-      `Evaluating state for ${executionContext.contractDefinition.txId} [${missingInteractions.length} non-cached of ${executionContext.sortedInteractions.length} all]`
+      `Evaluating state for ${contractDefinition.txId} [${missingInteractions.length} non-cached of ${sortedInteractions.length} all]`
     );
 
     this.logger.debug('Base state:', baseState.state);
@@ -78,7 +81,8 @@ export class DefaultStateEvaluator implements StateEvaluator {
         }/${missingInteractions.length} [of all:${sortedInteractions.length}]`
       );
 
-      const state = await this.onNextIteration(interactionTx, executionContext);
+      // verifying whether state isn't already available for this exact interaction.
+      const state = await this.transactionState<State>(interactionTx, contractDefinition.txId);
       const isInteractWrite = this.tagsParser.isInteractWrite(missingInteraction, contractDefinition.txId);
 
       this.logger.debug('interactWrite?:', isInteractWrite);
@@ -116,7 +120,7 @@ export class DefaultStateEvaluator implements StateEvaluator {
         ]);
 
         // loading latest state of THIS contract from cache
-        const newState = await this.latestAvailableState(contractDefinition.txId, interactionTx.block.height);
+        const newState = await this.latestAvailableState<State>(contractDefinition.txId, interactionTx.block.height);
         this.logger.debug('New state:', {
           height: interactionTx.block.height,
           newState,
@@ -172,7 +176,7 @@ export class DefaultStateEvaluator implements StateEvaluator {
         const interactionCall: InteractionCall = contract.getCallStack().addInteractionData(interactionData);
 
         if (state !== null) {
-          this.logger.debug('Found in intermediary cache');
+          this.logger.debug('Found in cache');
           intermediaryCacheHit = true;
           currentState = state.state;
           validity = state.validity;
@@ -257,61 +261,37 @@ export class DefaultStateEvaluator implements StateEvaluator {
     }
   }
 
-  async onStateUpdate<State>(
-    currentInteraction: GQLNodeInterface,
-    executionContext: ExecutionContext<State>,
-    state: EvalStateResult<State>
-  ): Promise<void> {
-    if (executionContext.evaluationOptions.fcpOptimization && !currentInteraction.dry) {
-      this.transactionStateCache.put(
-        `${executionContext.contractDefinition.txId}|${currentInteraction.id}`,
-        deepCopy(state)
-      );
-    }
-  }
-
-  async onNextIteration<State>(
-    currentInteraction: GQLNodeInterface,
-    executionContext: ExecutionContext<State>
-  ): Promise<EvalStateResult<State>> {
-    const cacheKey = `${executionContext.contractDefinition.txId}|${currentInteraction.id}`;
-    const cachedState = this.transactionStateCache.get(cacheKey);
-
-    if (cachedState == null) {
-      return null;
-    } else {
-      return deepCopy(cachedState as EvalStateResult<State>);
-    }
-  }
-
-  onContractCall<State>(
-    currentInteraction: GQLNodeInterface,
-    executionContext: ExecutionContext<State>,
-    state: EvalStateResult<State>
-  ): Promise<void> {
-    return Promise.resolve(undefined);
-  }
-
-  onStateEvaluated<State>(
-    lastInteraction: GQLNodeInterface,
-    executionContext: ExecutionContext<State>,
-    state: EvalStateResult<State>
-  ): Promise<void> {
-    return Promise.resolve(undefined);
-  }
-
-  async latestAvailableState<State>(
+  abstract latestAvailableState<State>(
     contractTxId: string,
     blockHeight: number
-  ): Promise<BlockHeightCacheResult<EvalStateResult<State>> | null> {
-    return null;
-  }
+  ): Promise<BlockHeightCacheResult<EvalStateResult<State>> | null>;
 
-  onInternalWriteStateUpdate<State>(
-    currentInteraction: GQLNodeInterface,
+  abstract onContractCall<State>(
+    transaction: GQLNodeInterface,
+    executionContext: ExecutionContext<State>,
+    state: EvalStateResult<State>
+  ): Promise<void>;
+
+  abstract onInternalWriteStateUpdate<State>(
+    transaction: GQLNodeInterface,
     contractTxId: string,
     state: EvalStateResult<State>
-  ): Promise<void> {
-    return Promise.resolve(undefined);
-  }
+  ): Promise<void>;
+
+  abstract onStateEvaluated<State>(
+    transaction: GQLNodeInterface,
+    executionContext: ExecutionContext<State>,
+    state: EvalStateResult<State>
+  ): Promise<void>;
+
+  abstract onStateUpdate<State>(
+    transaction: GQLNodeInterface,
+    executionContext: ExecutionContext<State>,
+    state: EvalStateResult<State>
+  ): Promise<void>;
+
+  abstract transactionState<State>(
+    transaction: GQLNodeInterface,
+    contractTxId: string
+  ): Promise<EvalStateResult<State> | null>;
 }
